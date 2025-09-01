@@ -1,3 +1,4 @@
+from decimal import Decimal
 from sqlalchemy import (
     Column,
     Date,
@@ -56,9 +57,13 @@ class Transaction(Base):
 class Rule(Base):
     __tablename__ = "rules"
     id = Column(Integer, primary_key=True)
-    type = Column(String, nullable=False)
-    pattern = Column(String, nullable=False)
+    type = Column(String, nullable=False)  # This will store RuleType enum values
+    pattern = Column(String, nullable=False, index=True)
+    priority = Column(Integer, nullable=False, default=100)
+    confidence_base = Column(Numeric(3, 2), nullable=False, default=Decimal("1.00"))
+
     subcategory_id = Column(Integer, ForeignKey("subcategories.id"), nullable=False)
+    subcategory = relationship("Subcategory")
 
 
 class Budget(Base):

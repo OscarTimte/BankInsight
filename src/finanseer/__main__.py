@@ -8,6 +8,8 @@ from finanseer.core import (
     get_all_categories,
     set_category_for_transactions,
     get_transactions_by_text,
+    add_rule,
+    apply_rules,
 )
 from finanseer import models
 
@@ -28,6 +30,11 @@ def handle_import(args):
         import_budget_categories(db, budget_file)
 
         logging.info("Data import finished.")
+
+        if args.and_list:
+            print("\n" + "=" * 30)
+            handle_list_categories(args)
+
     finally:
         db.close()
 
@@ -130,12 +137,19 @@ def handle_review(args):
                     transaction_ids = [t.id for t in selected_transactions]
                     set_category_for_transactions(db, transaction_ids, chosen_subcategory.id)
 
-                    # Placeholder for B2: Rule creation
+                    # B2: Rule creation suggestion
                     print(f"Successfully categorized {len(transaction_ids)} transaction(s).")
-                    rule_input = input("Create a rule based on this categorization? (y/n): ").lower()
-                    if rule_input == 'y':
-                        # In a future step, this would trigger the rule creation flow.
-                        print("Rule creation logic will be implemented in EPIC C. Choice logged.")
+                    print("\nTo create a rule for this, you could use a command like:")
+
+                    # Suggest a rule based on counterparty name if available
+                    counterparty = selected_transactions[0].counterparty_name
+                    if counterparty:
+                        print(f'  poetry run python -m finanseer add-rule --type counterparty_name --pattern "{counterparty}" --category-id {chosen_subcategory.id}')
+
+                    # Suggest a rule based on IBAN if available
+                    iban = selected_transactions[0].counterparty_iban
+                    if iban:
+                        print(f'  poetry run python -m finanseer add-rule --type iban --pattern "{iban}" --category-id {chosen_subcategory.id}')
 
                 else:
                     print("Invalid category number.")
@@ -174,6 +188,40 @@ def handle_bulk_categorize(args):
     finally:
         db.close()
 
+def handle_add_rule(args):
+    """Handles the add-rule command."""
+    db_session_generator = get_db()
+    db = next(db_session_generator)
+    try:
+        add_rule(
+            db=db,
+            type=args.type,
+            pattern=args.pattern,
+            subcategory_id=args.category_id,
+            priority=args.priority
+        )
+    finally:
+        db.close()
+
+def handle_apply_rules(args):
+    """Handles the apply-rules command."""
+    logging.info("Starting to apply categorization rules...")
+    db_session_generator = get_db()
+    db = next(db_session_generator)
+    try:
+        # HACK: Ensure data is present for the demo
+        handle_import(argparse.Namespace(and_list=False))
+
+        count = apply_rules(db, dry_run=args.dry_run)
+
+        if args.dry_run:
+            print(f"\n[Dry Run] Completed. {count} transactions would be categorized.")
+        else:
+            print(f"\nRule application complete. {count} transactions were categorized.")
+    finally:
+        db.close()
+
+
 def main():
     """Main function to run the Finanseer application."""
     init_db()  # Ensure DB is initialized before any command is run
@@ -182,6 +230,7 @@ def main():
 
     # Import command
     parser_import = subparsers.add_parser('import', help='Import data from CSV files into the database.')
+    parser_import.add_argument('--and-list', action='store_true', help='List categories immediately after importing.')
     parser_import.set_defaults(func=handle_import)
 
     # Export command
@@ -203,6 +252,19 @@ def main():
     parser_bulk.add_argument('text', type=str, help='The text pattern to search for in payee and description.')
     parser_bulk.add_argument('category_id', type=int, help='The numeric ID of the subcategory to assign.')
     parser_bulk.set_defaults(func=handle_bulk_categorize)
+
+    # Add Rule command
+    parser_add_rule = subparsers.add_parser('add-rule', help='Add a new categorization rule.')
+    parser_add_rule.add_argument('--type', type=str, required=True, choices=['iban', 'counterparty_name', 'description_contains'], help='Type of the rule.')
+    parser_add_rule.add_argument('--pattern', type=str, required=True, help='The pattern to match (e.g., an IBAN or a keyword).')
+    parser_add_rule.add_argument('--category-id', type=int, required=True, help='The numeric ID of the subcategory to assign.')
+    parser_add_rule.add_argument('--priority', type=int, default=100, help='The priority of the rule (lower is higher).')
+    parser_add_rule.set_defaults(func=handle_add_rule)
+
+    # Apply Rules command
+    parser_apply_rules = subparsers.add_parser('apply-rules', help='Apply all active rules to uncategorized transactions.')
+    parser_apply_rules.add_argument('--dry-run', action='store_true', help='Simulate rule application without saving changes.')
+    parser_apply_rules.set_defaults(func=handle_apply_rules)
 
     args = parser.parse_args()
     args.func(args)

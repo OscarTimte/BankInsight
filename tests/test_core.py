@@ -92,23 +92,117 @@ def test_get_all_categories(db_session_with_data):
     assert len(food.subcategories) == 1
     assert food.subcategories[0].name == "Groceries"
 
-def test_set_category_for_transactions(db_session_with_data):
-    """Test assigning a category to one or more transactions."""
-    # First, get the uncategorized transactions
-    uncategorized_before = get_uncategorized_transactions(db_session_with_data)
-    assert len(uncategorized_before) == 2
+from finanseer.models import Rule
+from finanseer.schemas import RuleType
+from finanseer.core import apply_rules
 
-    # Get the ID of the subcategory to assign
-    groceries_sub = db_session_with_data.query(Subcategory).filter(Subcategory.name == "Groceries").one()
+def test_apply_rules_iban(db_session_with_data):
+    """Test that a transaction is categorized by an IBAN rule."""
+    session = db_session_with_data
+    # Add a transaction with a specific IBAN
+    t_iban = Transaction(id="t_iban", account_id="A1", transaction_date=date.today(), amount=Decimal("50.00"), currency="EUR", counterparty_iban="NL66INGB0001234567", mutation_type="debit", bank_source="Test")
+    session.add(t_iban)
+    # Get a subcategory to assign
+    sub_rent = session.query(Subcategory).filter(Subcategory.name == "Rent").one()
+    # Create the rule
+    rule = Rule(type=RuleType.IBAN.value, pattern="NL66INGB0001234567", subcategory_id=sub_rent.id, priority=10)
+    session.add(rule)
+    session.commit()
 
-    # Assign the category to one transaction
-    set_category_for_transactions(db_session_with_data, ["t2"], groceries_sub.id)
+    # Apply rules
+    count = apply_rules(session)
+    assert count == 1
 
-    # Verify
-    t2_updated = db_session_with_data.query(Transaction).filter(Transaction.id == "t2").one()
-    assert t2_updated.subcategory_id == groceries_sub.id
+    # Verify the transaction is categorized
+    t_iban_updated = session.query(Transaction).filter(Transaction.id == "t_iban").one()
+    assert t_iban_updated.subcategory_id == sub_rent.id
 
-    # Check that there is one less uncategorized transaction
-    uncategorized_after = get_uncategorized_transactions(db_session_with_data)
-    assert len(uncategorized_after) == 1
-    assert uncategorized_after[0].id == "t3"
+def test_apply_rules_counterparty_name(db_session_with_data):
+    """Test categorization by a counterparty name rule."""
+    session = db_session_with_data
+    t_cp = Transaction(id="t_cp", account_id="A1", transaction_date=date.today(), amount=Decimal("75.00"), currency="EUR", counterparty_name="CoolBlue BV", mutation_type="debit", bank_source="Test")
+    session.add(t_cp)
+    sub_groceries = session.query(Subcategory).filter(Subcategory.name == "Groceries").one()
+    rule = Rule(type=RuleType.COUNTERPARTY_NAME.value, pattern="coolblue", subcategory_id=sub_groceries.id, priority=10)
+    session.add(rule)
+    session.commit()
+
+    count = apply_rules(session)
+    assert count == 1
+    t_cp_updated = session.query(Transaction).filter(Transaction.id == "t_cp").one()
+    assert t_cp_updated.subcategory_id == sub_groceries.id
+
+def test_apply_rules_description_contains(db_session_with_data):
+    """Test categorization by a description contains rule."""
+    session = db_session_with_data
+    t_desc = Transaction(id="t_desc", account_id="A1", transaction_date=date.today(), amount=Decimal("80.00"), currency="EUR", description_raw="Online payment to Amazon.com", mutation_type="debit", bank_source="Test")
+    session.add(t_desc)
+    sub_groceries = session.query(Subcategory).filter(Subcategory.name == "Groceries").one()
+    rule = Rule(type=RuleType.DESCRIPTION_CONTAINS.value, pattern="amazon", subcategory_id=sub_groceries.id, priority=10)
+    session.add(rule)
+    session.commit()
+
+    count = apply_rules(session)
+    assert count == 1
+    t_desc_updated = session.query(Transaction).filter(Transaction.id == "t_desc").one()
+    assert t_desc_updated.subcategory_id == sub_groceries.id
+
+def test_apply_rules_priority(db_session_with_data):
+    """Test that a higher priority rule (lower number) is chosen over a lower priority one."""
+    session = db_session_with_data
+    t_priority = Transaction(id="t_prio", account_id="A1", transaction_date=date.today(), amount=Decimal("100.00"), currency="EUR", counterparty_name="Albert Heijn", mutation_type="debit", bank_source="Test")
+    session.add(t_priority)
+
+    sub_rent = session.query(Subcategory).filter(Subcategory.name == "Rent").one()
+    sub_groceries = session.query(Subcategory).filter(Subcategory.name == "Groceries").one()
+
+    # Conflicting rules
+    rule_low_prio = Rule(type=RuleType.COUNTERPARTY_NAME.value, pattern="albert heijn", subcategory_id=sub_rent.id, priority=100)
+    rule_high_prio = Rule(type=RuleType.COUNTERPARTY_NAME.value, pattern="albert heijn", subcategory_id=sub_groceries.id, priority=10)
+    session.add_all([rule_low_prio, rule_high_prio])
+    session.commit()
+
+    count = apply_rules(session)
+    assert count == 1
+    t_prio_updated = session.query(Transaction).filter(Transaction.id == "t_prio").one()
+    # Should be categorized as Groceries due to higher priority
+    assert t_prio_updated.subcategory_id == sub_groceries.id
+
+def test_apply_rules_dry_run(db_session_with_data):
+    """Test that dry_run simulates changes without committing them."""
+    session = db_session_with_data
+    t_dry = Transaction(id="t_dry", account_id="A1", transaction_date=date.today(), amount=Decimal("50.00"), currency="EUR", counterparty_iban="NL66INGB0001234567", mutation_type="debit", bank_source="Test")
+    session.add(t_dry)
+    sub_rent = session.query(Subcategory).filter(Subcategory.name == "Rent").one()
+    rule = Rule(type=RuleType.IBAN.value, pattern="NL66INGB0001234567", subcategory_id=sub_rent.id, priority=10)
+    session.add(rule)
+    session.commit()
+
+    # Apply rules with dry_run=True
+    count = apply_rules(session, dry_run=True)
+    assert count == 1
+
+    # Verify the transaction is NOT categorized in the session
+    session.expire_all() # Ensure we get fresh data from the DB
+    t_dry_updated = session.query(Transaction).filter(Transaction.id == "t_dry").one()
+    assert t_dry_updated.subcategory_id is None
+
+def test_apply_rules_no_match(db_session_with_data):
+    """Test that no changes are made if no rules match."""
+    session = db_session_with_data
+    # Use one of the existing uncategorized transactions
+    t2 = session.query(Transaction).filter(Transaction.id == "t2").one()
+    assert t2.subcategory_id is None
+
+    # Add a rule that won't match
+    sub_rent = session.query(Subcategory).filter(Subcategory.name == "Rent").one()
+    rule = Rule(type=RuleType.IBAN.value, pattern="NON_EXISTENT_IBAN", subcategory_id=sub_rent.id, priority=10)
+    session.add(rule)
+    session.commit()
+
+    count = apply_rules(session)
+    assert count == 0
+
+    # Verify the transaction is still uncategorized
+    t2_updated = session.query(Transaction).filter(Transaction.id == "t2").one()
+    assert t2_updated.subcategory_id is None

@@ -60,3 +60,9 @@ class BudgetCategory(BaseModel):
     """Represents a main budget category with its subcategories."""
     name: str
     subcategories: set[str] = Field(default_factory=set)
+
+
+class RuleType(str, Enum):
+    IBAN = "iban"
+    COUNTERPARTY_NAME = "counterparty_name"
+    DESCRIPTION_CONTAINS = "description_contains"

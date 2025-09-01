@@ -117,3 +117,104 @@ def set_category_for_transactions(db: Session, transaction_ids: List[str], subca
     except Exception as e:
         db.rollback()
         logging.error(f"Failed to update transactions in DB: {e}")
+
+
+def add_rule(db: Session, type: str, pattern: str, subcategory_id: int, priority: int = 100):
+    """
+    Creates a new rule and adds it to the database.
+
+    Args:
+        db: The database session.
+        type: The type of the rule (e.g., 'iban', 'description_contains').
+        pattern: The pattern to match.
+        subcategory_id: The subcategory to assign on a match.
+        priority: The priority of the rule.
+    """
+    # Verify the subcategory exists
+    subcategory = db.query(models.Subcategory).filter(models.Subcategory.id == subcategory_id).first()
+    if not subcategory:
+        logging.error(f"No subcategory found with ID {subcategory_id}. Rule not created.")
+        return
+
+    logging.info(f"Adding new rule: TYPE={type}, PATTERN='{pattern}', CATEGORY='{subcategory.category.name}: {subcategory.name}', PRIO={priority}")
+
+    new_rule = models.Rule(
+        type=type,
+        pattern=pattern,
+        subcategory_id=subcategory_id,
+        priority=priority,
+    )
+    db.add(new_rule)
+
+    try:
+        db.commit()
+        logging.info("Successfully added new rule.")
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Failed to add rule to DB: {e}")
+
+
+def apply_rules(db: Session, dry_run: bool = False) -> int:
+    """
+    Applies all active rules to uncategorized transactions.
+
+    Args:
+        db: The database session.
+        dry_run: If True, no changes will be committed to the database.
+
+    Returns:
+        The number of transactions that were categorized.
+    """
+    from .text_processing import normalize_description
+    from .schemas import RuleType
+
+    logging.info(f"Starting rule application process. Dry run: {dry_run}")
+
+    rules = db.query(models.Rule).order_by(models.Rule.priority).all()
+    if not rules:
+        logging.warning("No rules found in the database. Aborting.")
+        return 0
+
+    transactions = get_uncategorized_transactions(db)
+    if not transactions:
+        logging.info("No uncategorized transactions to process.")
+        return 0
+
+    categorized_count = 0
+    for t in transactions:
+        for rule in rules:
+            matched = False
+            # Check for match based on rule type
+            if rule.type == RuleType.IBAN.value and t.counterparty_iban == rule.pattern:
+                matched = True
+            elif rule.type == RuleType.COUNTERPARTY_NAME.value and t.counterparty_name and rule.pattern.lower() in t.counterparty_name.lower():
+                matched = True
+            elif rule.type == RuleType.DESCRIPTION_CONTAINS.value and t.description_raw:
+                normalized_desc = normalize_description(t.description_raw)
+                if rule.pattern.lower() in normalized_desc:
+                    matched = True
+
+            if matched:
+                categorized_count += 1
+                if dry_run:
+                    logging.info(
+                        f"[Dry Run] Transaction '{t.id[:8]}...' ({t.counterparty_name}) would be categorized as "
+                        f"'{rule.subcategory.category.name}: {rule.subcategory.name}' by rule ID {rule.id} (pattern: '{rule.pattern}')."
+                    )
+                else:
+                    logging.info(
+                        f"Transaction '{t.id[:8]}...' ({t.counterparty_name}) categorized as "
+                        f"'{rule.subcategory.category.name}: {rule.subcategory.name}' by rule ID {rule.id}."
+                    )
+                    t.subcategory_id = rule.subcategory_id
+                break  # Stop processing rules for this transaction
+
+    if not dry_run:
+        try:
+            db.commit()
+            logging.info(f"Successfully committed {categorized_count} new categorizations.")
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to commit categorizations: {e}")
+
+    return categorized_count
