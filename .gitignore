@@ -1,0 +1,18 @@
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# CSV files (both source and export)
+*.csv
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+
+# Poetry
+.venv/
